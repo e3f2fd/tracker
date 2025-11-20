@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 
+import bcrypt from 'bcryptjs';
 import jwt, { JwtPayload } from 'jsonwebtoken';
 
 import { JWT_SECRET } from '../config.js';
@@ -7,87 +8,32 @@ import { query } from '../db.js';
 
 type DbUser = {
 	id: string;
-	email: string;
+	username: string;
+	password_hash: string;
 	display_name: string | null;
-	provider: string;
-	provider_user_id: string;
-	avatar_url: string | null;
 	created_at: string;
 	updated_at: string;
 };
 
 export type User = {
 	id: string;
-	email: string;
+	username: string;
 	displayName: string | null;
-	provider: string;
-	providerUserId: string;
-	avatarUrl: string | null;
 	createdAt: string;
 	updatedAt: string;
 };
+
+const PASSWORD_SALT_ROUNDS = 12;
 
 // converts a db row into the public user shape
 function mapDbUser(row: DbUser): User {
 	return {
 		id: row.id,
-		email: row.email,
+		username: row.username,
 		displayName: row.display_name,
-		provider: row.provider,
-		providerUserId: row.provider_user_id,
-		avatarUrl: row.avatar_url,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at
 	};
-}
-
-// creates or updates a user record from OAuth profile data
-export async function upsertOAuthUser(input: {
-	email: string;
-	displayName: string | null;
-	provider: string;
-	providerUserId: string;
-	avatarUrl: string | null;
-}): Promise<User> {
-	const existing = await query<DbUser>(
-		`
-			SELECT *
-			FROM users
-			WHERE provider = $1 AND provider_user_id = $2
-			LIMIT 1
-		`,
-		[input.provider, input.providerUserId]
-	);
-
-	const existingRow = existing.rows[0];
-
-	if (existingRow) {
-		const updated = await query<DbUser>(
-			`
-				UPDATE users
-				SET email = $1,
-					display_name = $2,
-					avatar_url = $3,
-					updated_at = CURRENT_TIMESTAMP
-				WHERE provider = $4 AND provider_user_id = $5
-				RETURNING *
-			`,
-			[input.email, input.displayName, input.avatarUrl, input.provider, input.providerUserId]
-		);
-
-		return mapDbUser(updated.rows[0]);
-	}
-
-	const inserted = await query<DbUser>(
-		`
-			INSERT INTO users (id, email, display_name, provider, provider_user_id, avatar_url)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			RETURNING *
-		`,
-		[randomUUID(), input.email, input.displayName, input.provider, input.providerUserId, input.avatarUrl]
-	);
-
-	return mapDbUser(inserted.rows[0]);
 }
 
 // loads a user by their id
@@ -109,13 +55,59 @@ export async function getUserById(id: string): Promise<User | null> {
 	return mapDbUser(result.rows[0]);
 }
 
+async function getUserWithSensitiveFieldsByUsername(username: string): Promise<DbUser | null> {
+	const result = await query<DbUser>(
+		`
+			SELECT *
+			FROM users
+			WHERE username = $1
+			LIMIT 1
+		`,
+		[username]
+	);
+
+	return result.rowCount ? result.rows[0] : null;
+}
+
+export async function createUser(input: {
+	username: string;
+	password: string;
+	displayName?: string | null;
+}): Promise<User> {
+	const passwordHash = await bcrypt.hash(input.password, PASSWORD_SALT_ROUNDS);
+	const inserted = await query<DbUser>(
+		`
+			INSERT INTO users (id, username, password_hash, display_name)
+			VALUES ($1, $2, $3, $4)
+			RETURNING *
+		`,
+		[randomUUID(), input.username, passwordHash, input.displayName ?? null]
+	);
+
+	return mapDbUser(inserted.rows[0]);
+}
+
+export async function authenticateUser(input: { username: string; password: string }): Promise<User | null> {
+	const row = await getUserWithSensitiveFieldsByUsername(input.username);
+
+	if (!row) {
+		return null;
+	}
+
+	const matches = await bcrypt.compare(input.password, row.password_hash);
+	if (!matches) {
+		return null;
+	}
+
+	return mapDbUser(row);
+}
+
 // creates a signed JWT for a user
 export function generateAuthToken(user: User): string {
 	return jwt.sign(
 		{
 			sub: user.id,
-			email: user.email,
-			provider: user.provider
+			username: user.username
 		},
 		JWT_SECRET,
 		{
