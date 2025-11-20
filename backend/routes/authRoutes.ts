@@ -1,83 +1,59 @@
+import { DatabaseError } from 'pg';
 import express from 'express';
 
-import { GOOGLE_REDIRECT_URI } from '../config.js';
-import { generateAuthToken, getUserById, upsertOAuthUser, verifyAuthToken } from '../services/authService.js';
-import { generateOAuthNonce, generateOAuthState, getGoogleClient } from '../services/oauthClient.js';
+import { authenticateUser, createUser, generateAuthToken, getUserById, verifyAuthToken } from '../services/authService.js';
 
 const router = express.Router();
 
-// begins the Google OAuth flow
-router.get('/google/start', async (req, res) => {
+router.post('/register', async (req, res) => {
+	const { username, password, displayName } = req.body ?? {};
+
+	if (typeof username !== 'string' || typeof password !== 'string' || username.trim().length < 3 || password.length < 8) {
+		res.status(400).json({ error: 'username and password required (username >= 3 chars, password >= 8 chars)' });
+		return;
+	}
+
 	try {
-		const client = await getGoogleClient();
-		const state = generateOAuthState();
-		const nonce = generateOAuthNonce();
-
-		req.session.oauthState = state;
-		req.session.oauthNonce = nonce;
-
-		const authorizationUrl = client.authorizationUrl({
-			scope: 'openid email profile',
-			state,
-			nonce,
-			access_type: 'offline',
-			prompt: 'consent'
+		const user = await createUser({
+			username: username.trim(),
+			password,
+			displayName: typeof displayName === 'string' ? displayName.trim() : null
 		});
+		const token = generateAuthToken(user);
 
-		res.json({ url: authorizationUrl });
+		res.status(201).json({ token, user });
 	} catch (err) {
-		console.error('failed to create google auth url', err);
-		res.status(500).json({ error: 'failed to start oauth flow' });
+		if (err instanceof DatabaseError && err.code === '23505') {
+			res.status(409).json({ error: 'username already taken' });
+			return;
+		}
+
+		console.error('failed to create account', err);
+		res.status(500).json({ error: 'failed to create account' });
 	}
 });
 
-// handles the Google OAuth callback
-router.get('/google/callback', async (req, res) => {
+router.post('/login', async (req, res) => {
+	const { username, password } = req.body ?? {};
+
+	if (typeof username !== 'string' || typeof password !== 'string') {
+		res.status(400).json({ error: 'username and password required' });
+		return;
+	}
+
 	try {
-		const client = await getGoogleClient();
-		const params = client.callbackParams(req);
+		const user = await authenticateUser({ username: username.trim(), password });
 
-		if (!req.session.oauthState || params.state !== req.session.oauthState) {
-			res.status(400).json({ error: 'state mismatch' });
+		if (!user) {
+			res.status(401).json({ error: 'invalid credentials' });
 			return;
 		}
-
-		const tokenSet = await client.callback(
-			GOOGLE_REDIRECT_URI,
-			params,
-			{
-				state: req.session.oauthState,
-				nonce: req.session.oauthNonce
-			},
-			{ exchangeBody: { code_verifier: params.code_verifier } }
-		);
-
-		const claims = tokenSet.claims();
-		if (!claims.sub || !claims.email) {
-			res.status(400).json({ error: 'missing user information from google' });
-			return;
-		}
-
-		const user = await upsertOAuthUser({
-			email: claims.email,
-			displayName: claims.name ?? claims.email,
-			provider: 'google',
-			providerUserId: claims.sub,
-			avatarUrl: claims.picture ?? null
-		});
 
 		const token = generateAuthToken(user);
-
-		req.session.oauthState = undefined;
-		req.session.oauthNonce = undefined;
-
-		res.json({
-			token,
-			user
-		});
+		res.json({ token, user });
 	} catch (err) {
-		console.error('google oauth callback failed', err);
-		res.status(500).json({ error: 'oauth callback failed' });
+		console.error('failed to login', err);
+		res.status(500).json({ error: 'failed to login' });
 	}
 });
 

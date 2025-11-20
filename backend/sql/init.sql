@@ -1,13 +1,10 @@
 CREATE TABLE IF NOT EXISTS users (
 	id TEXT NOT NULL PRIMARY KEY,
-	email TEXT NOT NULL UNIQUE,
+	username TEXT NOT NULL UNIQUE,
+	password_hash TEXT NOT NULL,
 	display_name TEXT,
-	provider TEXT NOT NULL,
-	provider_user_id TEXT NOT NULL,
-	avatar_url TEXT,
 	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	UNIQUE (provider, provider_user_id)
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS follows (
